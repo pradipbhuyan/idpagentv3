@@ -1,10 +1,14 @@
 # ==============================
 # INTELLIGENT DOCUMENT PROCESSOR
 # SPRINT 3: TEMPLATE MANAGER + VERSION HISTORY + DUPLICATE DETECTION
+# PLUS: BATCH ZIP DOWNLOADS + 10 FILE LIMIT
 # ==============================
 
+import re
+import zipfile
 import tempfile
 import hashlib
+from io import BytesIO
 from pathlib import Path
 from copy import deepcopy
 
@@ -38,6 +42,7 @@ from core import (
 # ------------------------------
 st.set_page_config("IDP - Professional", layout="wide")
 USERS = st.secrets.get("users", {})
+MAX_BATCH_FILES = 10
 
 # ------------------------------
 # CACHED MODELS
@@ -769,6 +774,63 @@ def go_to_next_batch_result():
         load_batch_result_into_session(next_index)
 
 
+def build_zip_from_batch_results(target_type: str) -> bytes:
+    output = BytesIO()
+
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
+        for item in st.session_state.get("batch_results", []):
+            auto_result = item.get("auto_result") or {}
+            result = auto_result.get("result") or {}
+            doc_type = item.get("doc_type")
+
+            if target_type == "resume" and doc_type == "resume":
+                file_bytes = result.get("file")
+                file_name = result.get("file_name") or f"{item.get('file_name', 'resume')}.docx"
+                if file_bytes:
+                    if not file_name.lower().endswith(".docx"):
+                        file_name = f"{file_name}.docx"
+                    zf.writestr(file_name, file_bytes)
+
+            elif target_type == "invoice" and doc_type == "invoice":
+                excel_bytes = result.get("excel")
+                review_data = item.get("review_data") or {}
+                file_name = (
+                    review_data.get("invoice_number")
+                    or review_data.get("invoice_no")
+                    or review_data.get("vendor")
+                    or item.get("file_name")
+                    or "invoice_data"
+                )
+                file_name = str(file_name).strip()
+                file_name = re.sub(r'[\\/*?:"<>|]', "", file_name)
+
+                if excel_bytes:
+                    if not file_name.lower().endswith(".xlsx"):
+                        file_name = f"{file_name}.xlsx"
+                    zf.writestr(file_name, excel_bytes)
+
+    output.seek(0)
+    return output.getvalue()
+
+
+def get_batch_download_counts():
+    resume_count = 0
+    invoice_count = 0
+
+    for item in st.session_state.get("batch_results", []):
+        auto_result = item.get("auto_result") or {}
+        result = auto_result.get("result") or {}
+        doc_type = item.get("doc_type")
+
+        if doc_type == "resume" and result.get("file"):
+            resume_count += 1
+
+        if doc_type == "invoice" and result.get("excel"):
+            invoice_count += 1
+
+    return resume_count, invoice_count
+
+
 def compact_field(label, value):
     st.markdown(
         f"**{label}**  \n<small>{value if value not in [None, ''] else '-'}</small>",
@@ -989,7 +1051,8 @@ def render_header():
 
 def render_sidebar_and_upload():
     with st.sidebar:
-        st.write(f"**{st.session_state['user']}**")
+        st.write(f"**Hi {st.session_state['user']}**")
+        st.markdown("---")
 
         st.markdown("### Model")
         model_choice = st.selectbox(
@@ -1000,9 +1063,11 @@ def render_sidebar_and_upload():
             )
         )
         st.session_state["model_choice"] = model_choice
+        st.markdown("---")
 
         st.success("🔑 API key loaded securely")
         cost = st.session_state.get("metrics", {}).get("cost", 0.0)
+        st.markdown("---")
         st.write(f"💰 Session Cost ${round(cost, 6)}")
 
         st.markdown("---")
@@ -1015,11 +1080,12 @@ def render_sidebar_and_upload():
     c1, c2 = st.columns([6, 1], gap="small")
     with c1:
         uploaded_files = st.file_uploader(
-            "Upload document(s)",
+            f"Upload document(s) - max {MAX_BATCH_FILES} files per batch",
             type=["txt", "pdf", "docx", "pptx", "xlsx", "png", "jpg", "jpeg"],
             accept_multiple_files=True,
             key=f"main_file_uploader_{st.session_state.uploader_key}"
         )
+
     with c2:
         st.write("")
         st.write("")
@@ -1037,6 +1103,10 @@ def render_sidebar_and_upload():
             st.session_state.uploader_key += 1
             reset_run_state()
             st.rerun()
+
+    if uploaded_files and len(uploaded_files) > MAX_BATCH_FILES:
+        st.error(f"Batch limit exceeded. Maximum allowed is {MAX_BATCH_FILES} files.")
+        uploaded_files = uploaded_files[:MAX_BATCH_FILES]
 
     st.markdown("---")
     return uploaded_files
@@ -1354,6 +1424,39 @@ def render_version_history():
         with st.expander("Snapshot Details", expanded=False):
             st.json(snap.get("review_data", {}))
 
+
+def render_batch_downloads():
+    st.markdown("### Batch Downloads")
+
+    resume_count, invoice_count = get_batch_download_counts()
+    d1, d2 = st.columns(2)
+
+    with d1:
+        if resume_count > 0:
+            resume_zip = build_zip_from_batch_results("resume")
+            st.download_button(
+                label=f"Download All Resumes ({resume_count})",
+                data=resume_zip,
+                file_name="all_resumes.zip",
+                mime="application/zip",
+                use_container_width=True
+            )
+        else:
+            st.button("Download All Resumes (0)", disabled=True, use_container_width=True, key="dl_all_resumes_disabled")
+
+    with d2:
+        if invoice_count > 0:
+            invoice_zip = build_zip_from_batch_results("invoice")
+            st.download_button(
+                label=f"Download All Invoice Excels ({invoice_count})",
+                data=invoice_zip,
+                file_name="all_invoice_excels.zip",
+                mime="application/zip",
+                use_container_width=True
+            )
+        else:
+            st.button("Download All Invoice Excels (0)", disabled=True, use_container_width=True, key="dl_all_invoices_disabled")
+
 # ------------------------------
 # MAIN
 # ------------------------------
@@ -1489,6 +1592,7 @@ with right_col:
 st.markdown("---")
 render_batch_table()
 render_exception_queue()
+render_batch_downloads()
 
 st.markdown("---")
 col_a, col_b = st.columns(2)
